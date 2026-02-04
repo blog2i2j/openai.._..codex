@@ -1,7 +1,5 @@
-use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
-use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
@@ -14,6 +12,9 @@ use ratatui::widgets::Wrap;
 use std::cell::Cell;
 
 use crate::ascii_animation::AsciiAnimation;
+use crate::key_hint::KeyBinding;
+use crate::key_hint::KeyBindingListExt;
+use crate::keymap::OnboardingKeymap;
 use crate::onboarding::onboarding_screen::KeyboardHandler;
 use crate::onboarding::onboarding_screen::StepStateProvider;
 use crate::tui::FrameRequester;
@@ -27,17 +28,21 @@ pub(crate) struct WelcomeWidget {
     pub is_logged_in: bool,
     animation: AsciiAnimation,
     animations_enabled: bool,
+    toggle_animation_keys: Vec<KeyBinding>,
     layout_area: Cell<Option<Rect>>,
 }
 
 impl KeyboardHandler for WelcomeWidget {
+    /// Rotate the welcome animation when the configured toggle shortcut fires.
+    ///
+    /// The key list comes from runtime keymap defaults/overrides and can
+    /// include compatibility variants for terminals that report modifier bits
+    /// differently.
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         if !self.animations_enabled {
             return;
         }
-        if key_event.kind == KeyEventKind::Press
-            && key_event.code == KeyCode::Char('.')
-            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+        if key_event.kind == KeyEventKind::Press && self.toggle_animation_keys.is_pressed(key_event)
         {
             tracing::warn!("Welcome background to press '.'");
             let _ = self.animation.pick_random_variant();
@@ -50,11 +55,13 @@ impl WelcomeWidget {
         is_logged_in: bool,
         request_frame: FrameRequester,
         animations_enabled: bool,
+        onboarding_keymap: OnboardingKeymap,
     ) -> Self {
         Self {
             is_logged_in,
             animation: AsciiAnimation::new(request_frame),
             animations_enabled,
+            toggle_animation_keys: onboarding_keymap.toggle_animation,
             layout_area: Cell::new(None),
         }
     }
@@ -108,6 +115,8 @@ impl StepStateProvider for WelcomeWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
     use pretty_assertions::assert_eq;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
@@ -132,6 +141,7 @@ mod tests {
             /*is_logged_in*/ false,
             FrameRequester::test_dummy(),
             /*animations_enabled*/ true,
+            crate::keymap::RuntimeKeymap::defaults().onboarding,
         );
         let area = Rect::new(0, 0, MIN_ANIMATION_WIDTH, MIN_ANIMATION_HEIGHT);
         let mut buf = Buffer::empty(area);
@@ -148,6 +158,7 @@ mod tests {
             /*is_logged_in*/ false,
             FrameRequester::test_dummy(),
             /*animations_enabled*/ true,
+            crate::keymap::RuntimeKeymap::defaults().onboarding,
         );
         let area = Rect::new(0, 0, MIN_ANIMATION_WIDTH, MIN_ANIMATION_HEIGHT - 1);
         let mut buf = Buffer::empty(area);
@@ -167,6 +178,9 @@ mod tests {
                 /*variant_idx*/ 0,
             ),
             animations_enabled: true,
+            toggle_animation_keys: crate::keymap::RuntimeKeymap::defaults()
+                .onboarding
+                .toggle_animation,
             layout_area: Cell::new(None),
         };
 
@@ -177,6 +191,31 @@ mod tests {
         assert_ne!(
             before, after,
             "expected ctrl+. to switch welcome animation variant"
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_dot_changes_animation_variant() {
+        let mut widget = WelcomeWidget {
+            is_logged_in: false,
+            animation: AsciiAnimation::with_variants(FrameRequester::test_dummy(), &VARIANTS, 0),
+            animations_enabled: true,
+            toggle_animation_keys: crate::keymap::RuntimeKeymap::defaults()
+                .onboarding
+                .toggle_animation,
+            layout_area: Cell::new(None),
+        };
+
+        let before = widget.animation.current_frame();
+        widget.handle_key_event(KeyEvent::new(
+            KeyCode::Char('.'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        let after = widget.animation.current_frame();
+
+        assert_ne!(
+            before, after,
+            "expected ctrl+shift+. to switch welcome animation variant"
         );
     }
 }
