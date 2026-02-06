@@ -116,6 +116,7 @@ mod history_cell;
 pub mod insert_history;
 mod key_hint;
 mod line_truncation;
+mod keymap;
 pub mod live_wrap;
 mod local_chatgpt_auth;
 mod markdown;
