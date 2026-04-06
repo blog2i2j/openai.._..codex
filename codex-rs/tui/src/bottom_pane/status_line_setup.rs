@@ -14,7 +14,7 @@
 //! - Git information (branch name)
 //! - Context usage (remaining %, used %, window size)
 //! - Usage limits (5-hour, weekly)
-//! - Session info (ID, tokens used)
+//! - Session info (thread title, ID, tokens used)
 //! - Application version
 
 use ratatui::buffer::Buffer;
@@ -95,6 +95,9 @@ pub(crate) enum StatusLineItem {
 
     /// Whether Fast mode is currently active.
     FastMode,
+
+    /// Current thread title (if available).
+    ThreadTitle,
 }
 
 impl StatusLineItem {
@@ -129,6 +132,7 @@ impl StatusLineItem {
                 "Current session identifier (omitted until session starts)"
             }
             StatusLineItem::FastMode => "Whether Fast mode is currently active",
+            StatusLineItem::ThreadTitle => "Current thread title (omitted until available)",
         }
     }
 }

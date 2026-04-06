@@ -139,13 +139,25 @@ impl ChatWidget {
         self.bottom_pane.set_status_line_enabled(enabled);
         if !enabled {
             self.set_status_line(/*status_line*/ None);
+            self.bottom_pane
+                .set_status_line_right(/*status_line_right*/ None);
             return;
         }
 
         let mut parts = Vec::new();
+        let mut right_line = None;
         for item in &selections.status_line_items {
-            if let Some(value) = self.status_line_value_for_item(item) {
-                parts.push(value);
+            match item {
+                StatusLineItem::ThreadTitle => {
+                    if let Some(value) = self.status_line_value_for_item(item) {
+                        right_line = Some(Line::from(value));
+                    }
+                }
+                _ => {
+                    if let Some(value) = self.status_line_value_for_item(item) {
+                        parts.push(value);
+                    }
+                }
             }
         }
 
@@ -155,6 +167,7 @@ impl ChatWidget {
             Some(Line::from(parts.join(" · ")))
         };
         self.set_status_line(line);
+        self.bottom_pane.set_status_line_right(right_line);
     }
 
     /// Clears the terminal title Codex most recently wrote, if any.
@@ -498,6 +511,10 @@ impl ChatWidget {
                     "Fast off".to_string()
                 },
             ),
+            StatusLineItem::ThreadTitle => self.thread_name.as_ref().and_then(|name| {
+                let trimmed = name.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }),
         }
     }
 

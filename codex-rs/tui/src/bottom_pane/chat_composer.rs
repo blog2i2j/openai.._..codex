@@ -336,10 +336,10 @@ pub(crate) struct ChatComposer {
     is_zellij: bool,
     status_line_value: Option<Line<'static>>,
     status_line_enabled: bool,
+    // Right-side contextual value controlled by status-line item selection.
+    status_line_right_value: Option<Line<'static>>,
     // Agent label injected into the footer's contextual row when multi-agent mode is active.
     active_agent_label: Option<String>,
-    // User-provided thread name shown in the footer's right-side context slot.
-    thread_name_label: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -463,8 +463,8 @@ impl ChatComposer {
             ),
             status_line_value: None,
             status_line_enabled: false,
+            status_line_right_value: None,
             active_agent_label: None,
-            thread_name_label: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -3328,6 +3328,17 @@ impl ChatComposer {
         true
     }
 
+    pub(crate) fn set_status_line_right(
+        &mut self,
+        status_line_right: Option<Line<'static>>,
+    ) -> bool {
+        if self.status_line_right_value == status_line_right {
+            return false;
+        }
+        self.status_line_right_value = status_line_right;
+        true
+    }
+
     /// Replaces the contextual footer label for the currently viewed agent.
     ///
     /// Returning `false` means the value was unchanged, so callers can skip redraw work. This
@@ -3338,18 +3349,6 @@ impl ChatComposer {
             return false;
         }
         self.active_agent_label = active_agent_label;
-        true
-    }
-
-    pub(crate) fn set_thread_name_label(&mut self, thread_name_label: Option<String>) -> bool {
-        let thread_name_label = thread_name_label.and_then(|name| {
-            let trimmed = name.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        });
-        if self.thread_name_label == thread_name_label {
-            return false;
-        }
-        self.thread_name_label = thread_name_label;
         true
     }
 }
@@ -3539,11 +3538,11 @@ impl ChatComposer {
                 } else {
                     self.collaboration_mode_indicator
                 };
-                let max_thread_name_width = available_width / 2;
-                let thread_name_line = self.thread_name_label.as_ref().map(|name| {
+                let max_status_line_right_width = available_width / 2;
+                let status_line_right_value = self.status_line_right_value.as_ref().map(|line| {
                     truncate_line_with_ellipsis_if_overflow(
-                        Line::from(vec![Span::from(name.clone()).dim()]),
-                        max_thread_name_width,
+                        line.clone().dim(),
+                        max_status_line_right_width,
                     )
                 });
                 let mut left_width = if self.footer_flash_visible() {
@@ -3570,12 +3569,12 @@ impl ChatComposer {
                 let right_line = if status_line_active {
                     let full =
                         mode_indicator_line(self.collaboration_mode_indicator, show_cycle_hint)
-                            .or_else(|| thread_name_line.clone());
+                            .or_else(|| status_line_right_value.clone());
                     let compact = mode_indicator_line(
                         self.collaboration_mode_indicator,
                         /*show_cycle_hint*/ false,
                     )
-                    .or_else(|| thread_name_line.clone());
+                    .or_else(|| status_line_right_value.clone());
                     let full_width = full.as_ref().map(|l| l.width() as u16).unwrap_or(0);
                     if can_show_left_with_context(hint_rect, left_width, full_width) {
                         full
@@ -3583,12 +3582,10 @@ impl ChatComposer {
                         compact
                     }
                 } else {
-                    thread_name_line.or_else(|| {
-                        Some(context_window_line(
-                            footer_props.context_window_percent,
-                            footer_props.context_window_used_tokens,
-                        ))
-                    })
+                    Some(context_window_line(
+                        footer_props.context_window_percent,
+                        footer_props.context_window_used_tokens,
+                    ))
                 };
                 let right_width = right_line.as_ref().map(|l| l.width() as u16).unwrap_or(0);
                 if status_line_active

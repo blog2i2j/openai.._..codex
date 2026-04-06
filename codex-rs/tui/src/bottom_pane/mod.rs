@@ -1176,18 +1176,18 @@ impl BottomPane {
         }
     }
 
+    pub(crate) fn set_status_line_right(&mut self, status_line_right: Option<Line<'static>>) {
+        if self.composer.set_status_line_right(status_line_right) {
+            self.request_redraw();
+        }
+    }
+
     /// Updates the contextual footer label and requests a redraw only when it changed.
     ///
     /// This keeps the footer plumbing cheap during thread transitions where `App` may recompute
     /// the label several times while the visible thread settles.
     pub(crate) fn set_active_agent_label(&mut self, active_agent_label: Option<String>) {
         if self.composer.set_active_agent_label(active_agent_label) {
-            self.request_redraw();
-        }
-    }
-
-    pub(crate) fn set_thread_name_label(&mut self, thread_name_label: Option<String>) {
-        if self.composer.set_thread_name_label(thread_name_label) {
             self.request_redraw();
         }
     }
