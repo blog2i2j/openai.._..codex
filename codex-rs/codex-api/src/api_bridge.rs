@@ -178,7 +178,7 @@ struct UsageErrorBody {
 pub struct CoreAuthProvider {
     pub token: Option<String>,
     pub account_id: Option<String>,
-    pub is_fedramp_account: bool,
+    pub chatgpt_account_routing_cookies: Vec<(String, String)>,
 }
 
 impl CoreAuthProvider {
@@ -196,7 +196,7 @@ impl CoreAuthProvider {
         Self {
             token: token.map(str::to_string),
             account_id: account_id.map(str::to_string),
-            is_fedramp_account: false,
+            chatgpt_account_routing_cookies: Vec::new(),
         }
     }
 }
@@ -210,7 +210,7 @@ impl ApiAuthProvider for CoreAuthProvider {
         self.account_id.clone()
     }
 
-    fn is_fedramp_account(&self) -> bool {
-        self.is_fedramp_account
+    fn chatgpt_account_routing_cookies(&self) -> Vec<(String, String)> {
+        self.chatgpt_account_routing_cookies.clone()
     }
 }

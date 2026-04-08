@@ -12,8 +12,8 @@ pub trait AuthProvider: Send + Sync {
     fn account_id(&self) -> Option<String> {
         None
     }
-    fn is_fedramp_account(&self) -> bool {
-        false
+    fn chatgpt_account_routing_cookies(&self) -> Vec<(String, String)> {
+        Vec::new()
     }
 }
 
@@ -28,18 +28,19 @@ pub(crate) fn add_auth_headers_to_header_map<A: AuthProvider>(auth: &A, headers:
     {
         let _ = headers.insert("ChatGPT-Account-ID", header);
     }
-    if auth.is_fedramp_account() {
-        add_fedramp_routing_cookie(headers);
+    for (name, value) in auth.chatgpt_account_routing_cookies() {
+        add_chatgpt_account_routing_cookie(headers, &name, &value);
     }
 }
 
-fn add_fedramp_routing_cookie(headers: &mut HeaderMap) {
-    const FEDRAMP_ROUTING_COOKIE: &str = "_account_is_fedramp=true";
+fn add_chatgpt_account_routing_cookie(headers: &mut HeaderMap, name: &str, value: &str) {
+    let cookie_pair = format!("{name}={value}");
+    let Ok(cookie_header_value) = HeaderValue::from_str(&cookie_pair) else {
+        return;
+    };
+
     let Some(value) = headers.get(http::header::COOKIE) else {
-        headers.insert(
-            http::header::COOKIE,
-            HeaderValue::from_static(FEDRAMP_ROUTING_COOKIE),
-        );
+        headers.insert(http::header::COOKIE, cookie_header_value);
         return;
     };
 
@@ -48,12 +49,12 @@ fn add_fedramp_routing_cookie(headers: &mut HeaderMap) {
     };
     if existing
         .split(';')
-        .any(|cookie| cookie.trim() == FEDRAMP_ROUTING_COOKIE)
+        .any(|cookie| cookie.trim() == cookie_pair)
     {
         return;
     }
 
-    if let Ok(value) = HeaderValue::from_str(&format!("{existing}; {FEDRAMP_ROUTING_COOKIE}")) {
+    if let Ok(value) = HeaderValue::from_str(&format!("{existing}; {cookie_pair}")) {
         headers.insert(http::header::COOKIE, value);
     }
 }
@@ -68,7 +69,7 @@ mod tests {
     use super::*;
 
     struct TestAuth {
-        is_fedramp_account: bool,
+        chatgpt_account_routing_cookies: Vec<(String, String)>,
     }
 
     impl AuthProvider for TestAuth {
@@ -76,15 +77,18 @@ mod tests {
             None
         }
 
-        fn is_fedramp_account(&self) -> bool {
-            self.is_fedramp_account
+        fn chatgpt_account_routing_cookies(&self) -> Vec<(String, String)> {
+            self.chatgpt_account_routing_cookies.clone()
         }
     }
 
     #[test]
-    fn auth_headers_add_fedramp_routing_cookie() {
+    fn auth_headers_add_account_routing_cookie() {
         let auth = TestAuth {
-            is_fedramp_account: true,
+            chatgpt_account_routing_cookies: vec![(
+                "_account_is_fedramp".to_string(),
+                "true".to_string(),
+            )],
         };
         let mut headers = HeaderMap::new();
 
@@ -99,9 +103,9 @@ mod tests {
     }
 
     #[test]
-    fn auth_headers_do_not_add_fedramp_cookie_by_default() {
+    fn auth_headers_do_not_add_account_routing_cookie_by_default() {
         let auth = TestAuth {
-            is_fedramp_account: false,
+            chatgpt_account_routing_cookies: Vec::new(),
         };
         let mut headers = HeaderMap::new();
 
@@ -111,9 +115,12 @@ mod tests {
     }
 
     #[test]
-    fn auth_headers_merge_fedramp_routing_cookie_with_existing_cookie() {
+    fn auth_headers_merge_account_routing_cookie_with_existing_cookie() {
         let auth = TestAuth {
-            is_fedramp_account: true,
+            chatgpt_account_routing_cookies: vec![(
+                "_account_is_fedramp".to_string(),
+                "true".to_string(),
+            )],
         };
         let mut headers = HeaderMap::new();
         headers.insert(http::header::COOKIE, HeaderValue::from_static("foo=bar"));

@@ -97,6 +97,16 @@ impl PathStyle {
     }
 }
 
+fn chatgpt_account_routing_cookie_header(routing_cookies: &[(String, String)]) -> Option<String> {
+    (!routing_cookies.is_empty()).then(|| {
+        routing_cookies
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct Client {
     base_url: String,
@@ -104,7 +114,7 @@ pub struct Client {
     bearer_token: Option<String>,
     user_agent: Option<HeaderValue>,
     chatgpt_account_id: Option<String>,
-    chatgpt_account_is_fedramp: bool,
+    chatgpt_account_routing_cookies: Vec<(String, String)>,
     path_style: PathStyle,
 }
 
@@ -130,7 +140,7 @@ impl Client {
             bearer_token: None,
             user_agent: None,
             chatgpt_account_id: None,
-            chatgpt_account_is_fedramp: false,
+            chatgpt_account_routing_cookies: Vec::new(),
             path_style,
         })
     }
@@ -143,9 +153,8 @@ impl Client {
         if let Some(account_id) = auth.get_account_id() {
             client = client.with_chatgpt_account_id(account_id);
         }
-        if auth.is_fedramp_account() {
-            client = client.with_fedramp_routing_cookie();
-        }
+        client =
+            client.with_chatgpt_account_routing_cookies(auth.chatgpt_account_routing_cookies());
         Ok(client)
     }
 
@@ -166,8 +175,11 @@ impl Client {
         self
     }
 
-    pub fn with_fedramp_routing_cookie(mut self) -> Self {
-        self.chatgpt_account_is_fedramp = true;
+    pub fn with_chatgpt_account_routing_cookies(
+        mut self,
+        routing_cookies: Vec<(String, String)>,
+    ) -> Self {
+        self.chatgpt_account_routing_cookies = routing_cookies;
         self
     }
 
@@ -195,10 +207,12 @@ impl Client {
         {
             h.insert(name, hv);
         }
-        if self.chatgpt_account_is_fedramp
+        if let Some(cookie_header) =
+            chatgpt_account_routing_cookie_header(&self.chatgpt_account_routing_cookies)
             && let Ok(name) = HeaderName::from_bytes(b"Cookie")
+            && let Ok(hv) = HeaderValue::from_str(&cookie_header)
         {
-            h.insert(name, HeaderValue::from_static("_account_is_fedramp=true"));
+            h.insert(name, hv);
         }
         h
     }
