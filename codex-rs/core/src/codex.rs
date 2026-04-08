@@ -272,7 +272,6 @@ use crate::injection::app_id_from_path;
 use crate::injection::tool_kind_for_path;
 use crate::instructions::UserInstructions;
 use crate::mcp::McpManager;
-use crate::mcp_openai_file::mask_model_visible_tool_input_schema;
 use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
 use crate::memories;
 use crate::mentions::build_connector_slug_counts;
@@ -6874,13 +6873,7 @@ pub(crate) async fn built_tools(
             mcp_tools: has_mcp_servers.then(|| {
                 mcp_tools
                     .into_iter()
-                    .map(|(name, tool_info)| {
-                        let mut tool = tool_info.tool;
-                        if tool_info.server_name == CODEX_APPS_MCP_SERVER_NAME {
-                            mask_model_visible_tool_input_schema(&mut tool);
-                        }
-                        (name, tool)
-                    })
+                    .map(|(name, tool_info)| (name, tool_info.model_visible_tool()))
                     .collect()
             }),
             app_tools,
