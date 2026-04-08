@@ -35,7 +35,7 @@ use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::CancelLoginAccountStatus;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponse;
-use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
+use codex_app_server_protocol::CodexErrorInfo;
 use codex_app_server_protocol::CollaborationModeListParams;
 use codex_app_server_protocol::CollaborationModeListResponse;
 use codex_app_server_protocol::CommandExecParams;
@@ -494,6 +494,16 @@ impl CodexMessageProcessor {
         AccountUpdatedNotification {
             auth_mode: auth.as_ref().map(CodexAuth::api_auth_mode),
             plan_type: auth.as_ref().and_then(CodexAuth::account_plan_type),
+        }
+    }
+
+    fn track_error_response(&self, request_id: &ConnectionRequestId, error: &JSONRPCErrorError) {
+        if self.config.features.enabled(Feature::GeneralAnalytics) {
+            self.analytics_events_client.track_error_response(
+                request_id.connection_id.0,
+                request_id.request_id.clone(),
+                error.clone(),
+            );
         }
     }
 
@@ -6706,23 +6716,27 @@ impl CodexMessageProcessor {
         let (_, thread) = match self.load_thread(&params.thread_id).await {
             Ok(v) => v,
             Err(error) => {
+                self.track_error_response(&request_id, &error);
                 self.outgoing.send_error(request_id, error).await;
                 return;
             }
         };
 
         if params.expected_turn_id.is_empty() {
-            self.send_invalid_request_error(
-                request_id,
-                "expectedTurnId must not be empty".to_string(),
-            )
-            .await;
+            let error = JSONRPCErrorError {
+                code: INVALID_REQUEST_ERROR_CODE,
+                message: "expectedTurnId must not be empty".to_string(),
+                data: None,
+            };
+            self.track_error_response(&request_id, &error);
+            self.outgoing.send_error(request_id, error).await;
             return;
         }
         self.outgoing
             .record_request_turn_id(&request_id, &params.expected_turn_id)
             .await;
         if let Err(error) = Self::validate_v2_input_limit(&params.input) {
+            self.track_error_response(&request_id, &error);
             self.outgoing.send_error(request_id, error).await;
             return;
         }
@@ -6739,6 +6753,15 @@ impl CodexMessageProcessor {
         {
             Ok(turn_id) => {
                 let response = TurnSteerResponse { turn_id };
+                if self.config.features.enabled(Feature::GeneralAnalytics) {
+                    self.analytics_events_client.track_response(
+                        request_id.connection_id.0,
+                        ClientResponse::TurnSteer {
+                            request_id: request_id.request_id.clone(),
+                            response: response.clone(),
+                        },
+                    );
+                }
                 self.outgoing.send_response(request_id, response).await;
             }
             Err(err) => {
@@ -6764,11 +6787,9 @@ impl CodexMessageProcessor {
                         };
                         let error = TurnError {
                             message: message.clone(),
-                            codex_error_info: Some(
-                                AppServerCodexErrorInfo::ActiveTurnNotSteerable {
-                                    turn_kind: turn_kind.into(),
-                                },
-                            ),
+                            codex_error_info: Some(CodexErrorInfo::ActiveTurnNotSteerable {
+                                turn_kind: turn_kind.into(),
+                            }),
                             additional_details: None,
                         };
                         let data = match serde_json::to_value(error) {
@@ -6794,6 +6815,7 @@ impl CodexMessageProcessor {
                     message,
                     data,
                 };
+                self.track_error_response(&request_id, &error);
                 self.outgoing.send_error(request_id, error).await;
             }
         }

@@ -39,8 +39,11 @@ use codex_app_server_protocol::AskForApproval as AppServerAskForApproval;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponse;
+use codex_app_server_protocol::CodexErrorInfo;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::InitializeParams;
+use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::NonSteerableTurnKind;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxPolicy as AppServerSandboxPolicy;
 use codex_app_server_protocol::ServerNotification;
@@ -55,6 +58,8 @@ use codex_app_server_protocol::TurnError as AppServerTurnError;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus as AppServerTurnStatus;
+use codex_app_server_protocol::TurnSteerParams;
+use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
 use codex_login::default_client::DEFAULT_ORIGINATOR;
 use codex_login::default_client::originator;
@@ -239,6 +244,84 @@ fn sample_turn_resolved_config(turn_id: &str) -> TurnResolvedConfigFact {
         collaboration_mode: ModeKind::Plan,
         personality: None,
         is_first_turn: true,
+    }
+}
+
+fn sample_runtime_metadata() -> CodexRuntimeMetadata {
+    CodexRuntimeMetadata {
+        codex_rs_version: "0.1.0".to_string(),
+        runtime_os: "macos".to_string(),
+        runtime_os_version: "15.3.1".to_string(),
+        runtime_arch: "aarch64".to_string(),
+    }
+}
+
+fn sample_turn_steer_request(
+    thread_id: &str,
+    expected_turn_id: &str,
+    request_id: i64,
+) -> ClientRequest {
+    ClientRequest::TurnSteer {
+        request_id: RequestId::Integer(request_id),
+        params: TurnSteerParams {
+            thread_id: thread_id.to_string(),
+            expected_turn_id: expected_turn_id.to_string(),
+            input: vec![
+                UserInput::Text {
+                    text: "more".to_string(),
+                    text_elements: vec![],
+                },
+                UserInput::LocalImage {
+                    path: "/tmp/a.png".into(),
+                },
+            ],
+        },
+    }
+}
+
+fn sample_turn_steer_response(turn_id: &str, request_id: i64) -> ClientResponse {
+    ClientResponse::TurnSteer {
+        request_id: RequestId::Integer(request_id),
+        response: TurnSteerResponse {
+            turn_id: turn_id.to_string(),
+        },
+    }
+}
+
+fn no_active_turn_steer_error() -> JSONRPCErrorError {
+    JSONRPCErrorError {
+        code: -32600,
+        message: "no active turn to steer".to_string(),
+        data: None,
+    }
+}
+
+fn non_steerable_review_error() -> JSONRPCErrorError {
+    JSONRPCErrorError {
+        code: -32600,
+        message: "cannot steer a review turn".to_string(),
+        data: Some(
+            serde_json::to_value(AppServerTurnError {
+                message: "cannot steer a review turn".to_string(),
+                codex_error_info: Some(CodexErrorInfo::ActiveTurnNotSteerable {
+                    turn_kind: NonSteerableTurnKind::Review,
+                }),
+                additional_details: None,
+            })
+            .expect("serialize turn error"),
+        ),
+    }
+}
+
+fn input_too_large_steer_error() -> JSONRPCErrorError {
+    JSONRPCErrorError {
+        code: -32602,
+        message: "Input exceeds the maximum length of 1048576 characters.".to_string(),
+        data: Some(json!({
+            "input_error_code": "input_too_large",
+            "actual_chars": 1048577,
+            "max_chars": 1048576,
+        })),
     }
 }
 
@@ -1064,7 +1147,7 @@ fn turn_event_serializes_expected_shape() {
             is_first_turn: true,
             status: Some(TurnStatus::Completed),
             turn_error: None,
-            steer_count: None,
+            steer_count: Some(0),
             total_tool_call_count: None,
             shell_command_count: None,
             file_change_count: None,
@@ -1110,7 +1193,7 @@ fn turn_event_serializes_expected_shape() {
                 "is_first_turn": true,
                 "status": "completed",
                 "turn_error": null,
-                "steer_count": null,
+                "steer_count": 0,
                 "total_tool_call_count": null,
                 "shell_command_count": null,
                 "file_change_count": null,
@@ -1130,6 +1213,265 @@ fn turn_event_serializes_expected_shape() {
             }
         })
     );
+}
+
+#[tokio::test]
+async fn accepted_turn_steer_emits_expected_event() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut out = Vec::new();
+
+    ingest_turn_prerequisites(
+        &mut reducer,
+        &mut out,
+        /*include_initialize*/ true,
+        /*include_resolved_config*/ false,
+        /*include_started*/ false,
+        /*include_token_usage*/ false,
+    )
+    .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Request {
+                connection_id: 7,
+                request_id: RequestId::Integer(4),
+                request: Box::new(sample_turn_steer_request(
+                    "thread-2", "turn-2", /*request_id*/ 4,
+                )),
+            },
+            &mut out,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Response {
+                connection_id: 7,
+                response: Box::new(sample_turn_steer_response("turn-2", /*request_id*/ 4)),
+            },
+            &mut out,
+        )
+        .await;
+
+    assert_eq!(out.len(), 1);
+    let payload = serde_json::to_value(&out[0]).expect("serialize turn steer event");
+    assert_eq!(payload["event_type"], json!("codex_turn_steer_event"));
+    assert_eq!(payload["event_params"]["thread_id"], json!("thread-2"));
+    assert_eq!(payload["event_params"]["expected_turn_id"], json!("turn-2"));
+    assert_eq!(payload["event_params"]["accepted_turn_id"], json!("turn-2"));
+    assert_eq!(payload["event_params"]["num_input_images"], json!(1));
+    assert_eq!(payload["event_params"]["result"], json!("accepted"));
+    assert_eq!(payload["event_params"]["rejection_reason"], json!(null));
+    assert!(
+        payload["event_params"]["created_at"]
+            .as_u64()
+            .expect("created_at")
+            > 0
+    );
+    assert_eq!(
+        payload["event_params"]["app_server_client"]["product_client_id"],
+        json!("codex-tui")
+    );
+    assert_eq!(
+        payload["event_params"]["runtime"]["codex_rs_version"],
+        json!("0.1.0")
+    );
+    assert!(payload["event_params"].get("product_client_id").is_none());
+}
+
+#[tokio::test]
+async fn rejected_turn_steer_uses_request_connection_metadata() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut out = Vec::new();
+
+    reducer
+        .ingest(
+            AnalyticsFact::Initialize {
+                connection_id: 7,
+                params: InitializeParams {
+                    client_info: ClientInfo {
+                        name: "codex-tui".to_string(),
+                        title: None,
+                        version: "1.0.0".to_string(),
+                    },
+                    capabilities: None,
+                },
+                product_client_id: "codex-tui".to_string(),
+                runtime: sample_runtime_metadata(),
+                rpc_transport: AppServerRpcTransport::Stdio,
+            },
+            &mut out,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Response {
+                connection_id: 7,
+                response: Box::new(sample_thread_start_response(
+                    "thread-2", /*ephemeral*/ false, "gpt-5",
+                )),
+            },
+            &mut out,
+        )
+        .await;
+    out.clear();
+
+    reducer
+        .ingest(
+            AnalyticsFact::Request {
+                connection_id: 7,
+                request_id: RequestId::Integer(4),
+                request: Box::new(sample_turn_steer_request(
+                    "thread-2", "turn-2", /*request_id*/ 4,
+                )),
+            },
+            &mut out,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::ErrorResponse {
+                connection_id: 7,
+                request_id: RequestId::Integer(4),
+                error: no_active_turn_steer_error(),
+            },
+            &mut out,
+        )
+        .await;
+
+    assert_eq!(out.len(), 1);
+    let payload = serde_json::to_value(&out[0]).expect("serialize turn steer event");
+    assert_eq!(payload["event_type"], json!("codex_turn_steer_event"));
+    assert_eq!(payload["event_params"]["thread_id"], json!("thread-2"));
+    assert_eq!(payload["event_params"]["expected_turn_id"], json!("turn-2"));
+    assert_eq!(payload["event_params"]["accepted_turn_id"], json!(null));
+    assert_eq!(payload["event_params"]["num_input_images"], json!(1));
+    assert_eq!(
+        payload["event_params"]["app_server_client"]["product_client_id"],
+        json!("codex-tui")
+    );
+    assert_eq!(
+        payload["event_params"]["runtime"]["codex_rs_version"],
+        json!("0.1.0")
+    );
+    assert_eq!(payload["event_params"]["result"], json!("rejected"));
+    assert_eq!(
+        payload["event_params"]["rejection_reason"],
+        json!("no_active_turn")
+    );
+    assert!(
+        payload["event_params"]["created_at"]
+            .as_u64()
+            .expect("created_at")
+            > 0
+    );
+}
+
+#[tokio::test]
+async fn rejected_turn_steer_maps_active_turn_not_steerable_error_data() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut out = Vec::new();
+
+    ingest_turn_prerequisites(
+        &mut reducer,
+        &mut out,
+        /*include_initialize*/ true,
+        /*include_resolved_config*/ false,
+        /*include_started*/ false,
+        /*include_token_usage*/ false,
+    )
+    .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Request {
+                connection_id: 7,
+                request_id: RequestId::Integer(4),
+                request: Box::new(sample_turn_steer_request(
+                    "thread-2", "turn-2", /*request_id*/ 4,
+                )),
+            },
+            &mut out,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::ErrorResponse {
+                connection_id: 7,
+                request_id: RequestId::Integer(4),
+                error: non_steerable_review_error(),
+            },
+            &mut out,
+        )
+        .await;
+
+    assert_eq!(out.len(), 1);
+    let payload = serde_json::to_value(&out[0]).expect("serialize turn steer event");
+    assert_eq!(
+        payload["event_params"]["rejection_reason"],
+        json!("non_steerable_review")
+    );
+}
+
+#[tokio::test]
+async fn rejected_turn_steer_maps_input_too_large_error_data() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut out = Vec::new();
+
+    ingest_turn_prerequisites(
+        &mut reducer,
+        &mut out,
+        /*include_initialize*/ true,
+        /*include_resolved_config*/ false,
+        /*include_started*/ false,
+        /*include_token_usage*/ false,
+    )
+    .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Request {
+                connection_id: 7,
+                request_id: RequestId::Integer(4),
+                request: Box::new(sample_turn_steer_request(
+                    "thread-2", "turn-2", /*request_id*/ 4,
+                )),
+            },
+            &mut out,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::ErrorResponse {
+                connection_id: 7,
+                request_id: RequestId::Integer(4),
+                error: input_too_large_steer_error(),
+            },
+            &mut out,
+        )
+        .await;
+
+    assert_eq!(out.len(), 1);
+    let payload = serde_json::to_value(&out[0]).expect("serialize turn steer event");
+    assert_eq!(
+        payload["event_params"]["rejection_reason"],
+        json!("input_too_large")
+    );
+}
+
+#[tokio::test]
+async fn turn_steer_does_not_emit_without_pending_request() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut out = Vec::new();
+
+    reducer
+        .ingest(
+            AnalyticsFact::ErrorResponse {
+                connection_id: 7,
+                request_id: RequestId::Integer(4),
+                error: no_active_turn_steer_error(),
+            },
+            &mut out,
+        )
+        .await;
+
+    assert!(out.is_empty());
 }
 
 #[tokio::test]
@@ -1169,6 +1511,7 @@ async fn turn_lifecycle_emits_turn_event() {
     );
     assert_eq!(payload["event_params"]["num_input_images"], json!(1));
     assert_eq!(payload["event_params"]["status"], json!("completed"));
+    assert_eq!(payload["event_params"]["steer_count"], json!(0));
     assert_eq!(payload["event_params"]["started_at"], json!(455));
     assert_eq!(payload["event_params"]["completed_at"], json!(456));
     assert_eq!(payload["event_params"]["duration_ms"], json!(1234));
@@ -1180,6 +1523,108 @@ async fn turn_lifecycle_emits_turn_event() {
         json!(13)
     );
     assert_eq!(payload["event_params"]["total_tokens"], json!(321));
+}
+
+#[tokio::test]
+async fn accepted_steers_increment_turn_steer_count() {
+    let mut reducer = AnalyticsReducer::default();
+    let mut out = Vec::new();
+
+    ingest_turn_prerequisites(
+        &mut reducer,
+        &mut out,
+        /*include_initialize*/ true,
+        /*include_resolved_config*/ true,
+        /*include_started*/ true,
+        /*include_token_usage*/ false,
+    )
+    .await;
+
+    reducer
+        .ingest(
+            AnalyticsFact::Request {
+                connection_id: 7,
+                request_id: RequestId::Integer(4),
+                request: Box::new(sample_turn_steer_request(
+                    "thread-2", "turn-2", /*request_id*/ 4,
+                )),
+            },
+            &mut out,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Response {
+                connection_id: 7,
+                response: Box::new(sample_turn_steer_response("turn-2", /*request_id*/ 4)),
+            },
+            &mut out,
+        )
+        .await;
+
+    reducer
+        .ingest(
+            AnalyticsFact::Request {
+                connection_id: 7,
+                request_id: RequestId::Integer(5),
+                request: Box::new(sample_turn_steer_request(
+                    "thread-2", "turn-2", /*request_id*/ 5,
+                )),
+            },
+            &mut out,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::ErrorResponse {
+                connection_id: 7,
+                request_id: RequestId::Integer(5),
+                error: no_active_turn_steer_error(),
+            },
+            &mut out,
+        )
+        .await;
+
+    reducer
+        .ingest(
+            AnalyticsFact::Request {
+                connection_id: 7,
+                request_id: RequestId::Integer(6),
+                request: Box::new(sample_turn_steer_request(
+                    "thread-2", "turn-2", /*request_id*/ 6,
+                )),
+            },
+            &mut out,
+        )
+        .await;
+    reducer
+        .ingest(
+            AnalyticsFact::Response {
+                connection_id: 7,
+                response: Box::new(sample_turn_steer_response("turn-2", /*request_id*/ 6)),
+            },
+            &mut out,
+        )
+        .await;
+
+    reducer
+        .ingest(
+            AnalyticsFact::Notification(Box::new(sample_turn_completed_notification(
+                "thread-2",
+                "turn-2",
+                AppServerTurnStatus::Completed,
+                /*codex_error_info*/ None,
+            ))),
+            &mut out,
+        )
+        .await;
+
+    let turn_event = out
+        .iter()
+        .find(|event| matches!(event, TrackEventRequest::TurnEvent(_)))
+        .expect("turn event should be emitted");
+    let payload = serde_json::to_value(turn_event).expect("serialize turn event");
+    assert_eq!(payload["event_params"]["steer_count"], json!(2));
 }
 
 #[tokio::test]
