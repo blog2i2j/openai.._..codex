@@ -17,6 +17,7 @@ use crate::config_loader::Sourced;
 use crate::test_support;
 use codex_config::config_toml::ConfigToml;
 use codex_network_proxy::NetworkProxyConfig;
+use codex_protocol::ThreadId;
 use codex_protocol::approvals::NetworkApprovalProtocol;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::ContentItem;
@@ -53,6 +54,11 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
+fn fixed_guardian_parent_session_id() -> ThreadId {
+    ThreadId::from_string("11111111-1111-4111-8111-111111111111")
+        .expect("fixed parent session id should be a valid UUID")
+}
+
 async fn guardian_test_session_and_turn(
     server: &wiremock::MockServer,
 ) -> (Arc<Session>, Arc<TurnContext>) {
@@ -63,6 +69,7 @@ async fn guardian_test_session_and_turn_with_base_url(
     base_url: &str,
 ) -> (Arc<Session>, Arc<TurnContext>) {
     let (mut session, mut turn) = crate::codex::make_session_and_context().await;
+    session.conversation_id = fixed_guardian_parent_session_id();
     let mut config = (*turn.config).clone();
     config.model_provider.base_url = Some(format!("{base_url}/v1"));
     config.user_instructions = None;
@@ -556,6 +563,7 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
     .await;
 
     let (mut session, mut turn) = crate::codex::make_session_and_context().await;
+    session.conversation_id = fixed_guardian_parent_session_id();
     let temp_cwd = TempDir::new()?;
     let mut config = (*turn.config).clone();
     config.cwd = temp_cwd.abs();
@@ -621,6 +629,42 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
             )
         );
     });
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn build_guardian_prompt_items_includes_parent_session_id() -> anyhow::Result<()> {
+    let (session, _) = crate::codex::make_session_and_context().await;
+    let prompt = build_guardian_prompt_items(
+        &session,
+        /*retry_reason*/ None,
+        GuardianApprovalRequest::Shell {
+            id: "shell-1".to_string(),
+            command: vec!["git".to_string(), "status".to_string()],
+            cwd: PathBuf::from("/repo"),
+            sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
+            additional_permissions: None,
+            justification: None,
+        },
+    )
+    .await?;
+    let prompt_text = prompt
+        .into_iter()
+        .map(|item| match item {
+            codex_protocol::user_input::UserInput::Text { text, .. } => text,
+            codex_protocol::user_input::UserInput::Image { .. } => String::new(),
+            _ => String::new(),
+        })
+        .collect::<String>();
+
+    assert!(
+        prompt_text.contains(&format!(
+            "Parent Codex session id: {}",
+            session.conversation_id
+        )),
+        "guardian prompt should expose the parent session id"
+    );
 
     Ok(())
 }
