@@ -39,6 +39,7 @@ use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
 use codex_protocol::protocol::RealtimeConversationSdpEvent;
 use codex_protocol::protocol::RealtimeConversationStartedEvent;
 use codex_protocol::protocol::RealtimeHandoffRequested;
+use codex_protocol::protocol::RealtimeTranscriptEntry;
 use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::RealtimeVoicesList;
 use http::HeaderMap;
@@ -49,6 +50,7 @@ use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::debug;
@@ -62,8 +64,11 @@ const HANDOFF_OUT_QUEUE_CAPACITY: usize = 64;
 const OUTPUT_EVENTS_QUEUE_CAPACITY: usize = 256;
 const REALTIME_STARTUP_CONTEXT_TOKEN_BUDGET: usize = 5_000;
 const DEFAULT_REALTIME_MODEL: &str = "gpt-realtime-1.5";
+const V1_HANDOFF_DELEGATION_GRACE: Duration = Duration::from_secs(1);
 const ACTIVE_RESPONSE_CONFLICT_ERROR_PREFIX: &str =
     "Conversation already has an active response in progress:";
+
+type PendingRealtimeHandoff = Arc<Mutex<Option<RealtimeHandoffRequested>>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RealtimeConversationEnd {
@@ -677,6 +682,10 @@ async fn handle_start_inner(
         events_rx,
         sdp,
     } = start_output;
+    let session_kind = match version {
+        RealtimeWsVersion::V1 => RealtimeSessionKind::V1,
+        RealtimeWsVersion::V2 => RealtimeSessionKind::V2,
+    };
     if let Some(sdp) = sdp {
         sess.send_event_raw(Event {
             id: sub_id.to_string(),
@@ -694,6 +703,7 @@ async fn handle_start_inner(
             msg,
         };
         let mut end = RealtimeConversationEnd::TransportClosed;
+        let mut pending_v1_handoff: Option<PendingRealtimeHandoff> = None;
         while let Ok(event) = events_rx.recv().await {
             if !fanout_realtime_active.load(Ordering::Relaxed) {
                 break;
@@ -708,16 +718,46 @@ async fn handle_start_inner(
             if matches!(event, RealtimeEvent::Error(_)) {
                 end = RealtimeConversationEnd::Error;
             }
-            let maybe_routed_text = match &event {
-                RealtimeEvent::HandoffRequested(handoff) => {
-                    realtime_text_from_handoff_request(handoff)
+            match &event {
+                RealtimeEvent::HandoffRequested(handoff)
+                    if session_kind == RealtimeSessionKind::V1 =>
+                {
+                    if let Some(pending) = pending_v1_handoff.take() {
+                        route_pending_realtime_handoff(Arc::clone(&sess_clone), pending).await;
+                    }
+                    let pending = Arc::new(Mutex::new(Some(handoff.clone())));
+                    let pending_for_task = Arc::clone(&pending);
+                    let sess_for_task = Arc::clone(&sess_clone);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(V1_HANDOFF_DELEGATION_GRACE).await;
+                        route_pending_realtime_handoff(sess_for_task, pending_for_task).await;
+                    });
+                    pending_v1_handoff = Some(pending);
                 }
-                _ => None,
-            };
-            if let Some(text) = maybe_routed_text {
-                debug!(text = %text, "[realtime-text] realtime conversation text output");
-                let sess_for_routed_text = Arc::clone(&sess_clone);
-                sess_for_routed_text.route_realtime_text_input(text).await;
+                RealtimeEvent::HandoffRequested(handoff) => {
+                    route_realtime_handoff(&sess_clone, handoff).await;
+                }
+                RealtimeEvent::InputTranscriptDelta(delta)
+                    if session_kind == RealtimeSessionKind::V1 =>
+                {
+                    append_pending_realtime_handoff_transcript_delta(
+                        &pending_v1_handoff,
+                        "user",
+                        &delta.delta,
+                    )
+                    .await;
+                }
+                RealtimeEvent::OutputTranscriptDelta(delta)
+                    if session_kind == RealtimeSessionKind::V1 =>
+                {
+                    append_pending_realtime_handoff_transcript_delta(
+                        &pending_v1_handoff,
+                        "assistant",
+                        &delta.delta,
+                    )
+                    .await;
+                }
+                _ => {}
             }
             if !fanout_realtime_active.load(Ordering::Relaxed) {
                 break;
@@ -729,6 +769,9 @@ async fn handle_start_inner(
                     },
                 )))
                 .await;
+        }
+        if let Some(pending) = pending_v1_handoff.take() {
+            route_pending_realtime_handoff(Arc::clone(&sess_clone), pending).await;
         }
         if fanout_realtime_active.swap(false, Ordering::Relaxed) {
             if matches!(end, RealtimeConversationEnd::TransportClosed) {
@@ -762,6 +805,58 @@ pub(crate) async fn handle_audio(
                 .await;
         }
     }
+}
+
+async fn route_realtime_handoff(sess: &Arc<Session>, handoff: &RealtimeHandoffRequested) {
+    if let Some(text) = realtime_text_from_handoff_request(handoff) {
+        debug!(text = %text, "[realtime-text] realtime conversation text output");
+        Arc::clone(sess).route_realtime_text_input(text).await;
+    }
+}
+
+async fn route_pending_realtime_handoff(sess: Arc<Session>, pending: PendingRealtimeHandoff) {
+    let handoff = pending.lock().await.take();
+    if let Some(handoff) = handoff {
+        route_realtime_handoff(&sess, &handoff).await;
+    }
+}
+
+async fn append_pending_realtime_handoff_transcript_delta(
+    pending: &Option<PendingRealtimeHandoff>,
+    role: &str,
+    delta: &str,
+) {
+    let Some(pending) = pending else {
+        return;
+    };
+    let mut pending = pending.lock().await;
+    let Some(handoff) = pending.as_mut() else {
+        return;
+    };
+    if handoff.active_transcript.is_empty() && !handoff.input_transcript.is_empty() {
+        append_transcript_delta(
+            &mut handoff.active_transcript,
+            "user",
+            &handoff.input_transcript,
+        );
+    }
+    append_transcript_delta(&mut handoff.active_transcript, role, delta);
+}
+
+fn append_transcript_delta(entries: &mut Vec<RealtimeTranscriptEntry>, role: &str, delta: &str) {
+    if delta.is_empty() {
+        return;
+    }
+    if let Some(last_entry) = entries.last_mut()
+        && last_entry.role == role
+    {
+        last_entry.text.push_str(delta);
+        return;
+    }
+    entries.push(RealtimeTranscriptEntry {
+        role: role.to_string(),
+        text: delta.to_string(),
+    });
 }
 
 fn realtime_text_from_handoff_request(handoff: &RealtimeHandoffRequested) -> Option<String> {
