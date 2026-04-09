@@ -132,6 +132,7 @@ fn create_tool_suggest_tool_uses_plugin_summary_fallback() {
                     "suggest_reason".to_string(),
                 ]), Some(false.into())),
             output_schema: None,
+            origin: ToolOrigin::Native,
         })
     );
 }
@@ -185,6 +186,7 @@ fn collect_tool_search_output_tools_groups_results_by_namespace() {
                             /*additional_properties*/ None
                         ),
                         output_schema: None,
+                        origin: ToolOrigin::Native,
                     }),
                     ResponsesApiNamespaceTool::Function(ResponsesApiTool {
                         name: "_list_events".to_string(),
@@ -197,6 +199,7 @@ fn collect_tool_search_output_tools_groups_results_by_namespace() {
                             /*additional_properties*/ None
                         ),
                         output_schema: None,
+                        origin: ToolOrigin::Native,
                     }),
                 ],
             }),
@@ -214,6 +217,7 @@ fn collect_tool_search_output_tools_groups_results_by_namespace() {
                         /*additional_properties*/ None
                     ),
                     output_schema: None,
+                    origin: ToolOrigin::Native,
                 })],
             }),
         ],
@@ -249,6 +253,7 @@ fn collect_tool_search_output_tools_falls_back_to_connector_name_description() {
                     /*additional_properties*/ None
                 ),
                 output_schema: None,
+                origin: ToolOrigin::Native,
             })],
         })],
     );

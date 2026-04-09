@@ -12,6 +12,7 @@ use crate::ResponsesApiWebSearchFilters;
 use crate::ResponsesApiWebSearchUserLocation;
 use crate::ToolHandlerSpec;
 use crate::ToolNamespace;
+use crate::ToolOrigin;
 use crate::ToolRegistryPlanAppTool;
 use crate::ToolsConfigParams;
 use crate::WaitAgentTimeoutOptions;
@@ -1145,6 +1146,7 @@ fn test_build_specs_mcp_tools_converted() {
             strict: false,
             output_schema: Some(mcp_call_tool_result_output_schema(serde_json::json!({}))),
             defer_loading: None,
+            origin: ToolOrigin::Mcp,
         })
     );
 }
