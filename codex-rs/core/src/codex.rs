@@ -50,7 +50,8 @@ use chrono::Local;
 use chrono::Utc;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::AppInvocation;
-use codex_analytics::CompactionTrigger;
+use codex_analytics::CompactionPhase;
+use codex_analytics::CompactionReason;
 use codex_analytics::InvocationType;
 use codex_analytics::SubAgentThreadStartedInput;
 use codex_analytics::build_track_events_context;
@@ -6218,7 +6219,8 @@ pub(crate) async fn run_turn(
                         &sess,
                         &turn_context,
                         InitialContextInjection::BeforeLastUserMessage,
-                        CompactionTrigger::AutoMidTurn,
+                        CompactionReason::TokenLimit,
+                        CompactionPhase::MidTurn,
                     )
                     .await
                     .is_err()
@@ -6405,7 +6407,8 @@ async fn run_pre_sampling_compact(
             sess,
             turn_context,
             InitialContextInjection::DoNotInject,
-            CompactionTrigger::AutoPreTurn,
+            CompactionReason::TokenLimit,
+            CompactionPhase::PreTurn,
         )
         .await?;
         pre_sampling_compacted = true;
@@ -6451,7 +6454,8 @@ async fn maybe_run_previous_model_inline_compact(
             sess,
             &previous_model_turn_context,
             InitialContextInjection::DoNotInject,
-            CompactionTrigger::ModelDownshift,
+            CompactionReason::ModelDownshift,
+            CompactionPhase::PreTurn,
         )
         .await?;
         return Ok(true);
@@ -6463,14 +6467,16 @@ async fn run_auto_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     initial_context_injection: InitialContextInjection,
-    trigger: CompactionTrigger,
+    reason: CompactionReason,
+    phase: CompactionPhase,
 ) -> CodexResult<()> {
     if should_use_remote_compact_task(&turn_context.provider) {
         run_inline_remote_auto_compact_task(
             Arc::clone(sess),
             Arc::clone(turn_context),
             initial_context_injection,
-            trigger,
+            reason,
+            phase,
         )
         .await?;
     } else {
@@ -6478,7 +6484,8 @@ async fn run_auto_compact(
             Arc::clone(sess),
             Arc::clone(turn_context),
             initial_context_injection,
-            trigger,
+            reason,
+            phase,
         )
         .await?;
     }
